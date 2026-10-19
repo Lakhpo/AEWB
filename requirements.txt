@@ -3,3 +3,5 @@ folium>=0.19,<0.21
 streamlit-folium>=0.25,<0.27
 shapely>=2.0,<3
 requests>=2.32,<3
+overturemaps==1.0.2
+pyproj>=3.6,<4

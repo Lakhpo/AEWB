@@ -3,7 +3,7 @@
 ## Project context and scope
 
 - Read [PROJECT.md](PROJECT.md) before planning or changing application behavior. It defines Pet Project's vision, requirements, proposed architecture, and phased roadmap.
-- The current checkpoint includes satellite navigation, AOI selection/export, Microsoft building analysis, and manual building corrections/planning. The latest Overture/OSM infrastructure changes were reverted at the user's request. Further infrastructure work, engineering analysis, custom models, architecture changes, and deployment require a new request.
+- Current scope includes satellite navigation, AOI selection/export, Microsoft building analysis, manual building corrections/planning, and a separate Overture road layer with optional OSM reference roads. Keep easements, road editing/planning, additional engineering analysis, custom models, architecture changes, and deployment deferred until requested.
 - Develop and validate one phase at a time. Do not implement later phases, custom computer vision, or a framework migration without a request.
 - Treat proposed technologies and future capabilities as plans, not existing functionality. Keep documentation accurate as work progresses.
 
@@ -21,6 +21,7 @@
 - Prefer established geospatial datasets before custom models. Evaluate rural as well as urban coverage; disclose coverage gaps and uncertainty.
 - Label matches as buildings/footprints, not verified houses. Count unique footprints with interior overlap with the AOI once; exclude boundary-only touches. Invalidate counts and overlays when AOI geometry changes. Do not turn network, coverage, or resource-limit errors into a zero count or silently present partial counts.
 - Keep AOI boundaries separate from building edits. Preserve the original Microsoft result and stable source IDs; maintain a working review with provenance and existing/planned status. Exclude plans from existing-building counts, retain valid corrections on same-AOI source refresh, and allow undo. Validate edits before updating counts/exports. Make session-only storage and download requirements clear.
+- Road loading must preserve the Microsoft building workflow, map viewport, and AOI. Keep roads outside editable feature groups. Query worldwide sources using AOI bounds; invalidate road results when AOIs change. Preserve source attributes/license metadata and clip centerlines to the AOI. Keep Overture and OSM reference counts/lengths and downloads separate because the sources overlap. Do not infer public access or easement rights. Bound network work and use geodesic measurements for lengths.
 - Validate AOIs before processing. Use WGS 84 longitude/latitude order for GeoJSON and explicit CRS handling for spatial operations. Do not perform metric calculations directly on geographic degrees.
 - Check provider licensing, attribution, access requirements, and redistribution terms when selecting imagery or datasets.
 - Keep credentials out of source control. Keep large imagery, bulk datasets, and generated outputs out of the repository; use small redistributable samples for validation.

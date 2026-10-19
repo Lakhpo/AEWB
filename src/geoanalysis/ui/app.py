@@ -5,6 +5,7 @@ Run from the repository root with:
 """
 
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 import sys
@@ -15,14 +16,21 @@ from folium.plugins import Draw, Fullscreen, Geocoder
 import streamlit as st
 from streamlit_folium import st_folium
 
-# Support the documented Streamlit entry point in this src-layout repository.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from geoanalysis.core.geometry import aoi_feature_collection
+# Streamlit watches imported modules under its script directory or PYTHONPATH.
+# sys.path alone makes sibling backend modules importable but leaves them
+# cached across edits, causing stale imports when new functions are added.
+source_root = str(Path(__file__).resolve().parents[2])
+sys.path.insert(0, source_root)
+python_paths = [path for path in os.environ.get("PYTHONPATH", "").split(os.pathsep) if path]
+if source_root not in python_paths:
+    os.environ["PYTHONPATH"] = os.pathsep.join([source_root, *python_paths])
+from geoanalysis.core.geometry import aoi_feature_collection, parse_coordinates
 from geoanalysis.analysis.analysis import find_buildings
 from geoanalysis.services.buildings import BuildingDataError
 from geoanalysis.core.building_review import (
     editing_parts, merge_analysis, review_counts, source_buildings, validate_building_edits,
 )
+from geoanalysis.ui.roads import render_road_controls, road_overlays
 
 
 class RestoreMapState(MacroElement):
@@ -163,7 +171,8 @@ def building_overlay(result):
 
 def clear_analysis():
     for name in ("building_result", "analysis_error", "building_review", "removed_buildings",
-                 "building_edit_error", "building_draft", "last_building_event", "building_undo"):
+                 "building_edit_error", "building_draft", "last_building_event", "building_undo",
+                 "road_result", "road_error"):
         st.session_state.pop(name, None)
 
 
@@ -220,9 +229,55 @@ def aoi_overlay(drawings):
     return group
 
 
+def coordinate_overlay(target):
+    """Display a navigation point outside every editable/exported collection."""
+    if target is None:
+        return None
+    group = folium.FeatureGroup(name="Coordinate search location")
+    folium.CircleMarker(
+        location=target, radius=7, color="white", weight=2,
+        fill=True, fill_color="#ef4444", fill_opacity=1,
+        tooltip=f"Coordinates: {target[0]:.6f}, {target[1]:.6f}",
+    ).add_to(group)
+    return group
+
+
+def render_coordinate_search():
+    with st.form("coordinate_search", border=False):
+        input_column, button_column = st.columns([3, 1], vertical_alignment="bottom")
+        with input_column:
+            value = st.text_input(
+                "Coordinates (latitude, longitude)", key="coordinate_query",
+                placeholder="43.0731, -89.4012",
+                help="WGS 84 decimal degrees, latitude first. Negative values indicate south or west.",
+            )
+        with button_column:
+            submitted = st.form_submit_button("Go to coordinates", use_container_width=True)
+    if submitted:
+        try:
+            target = list(parse_coordinates(value))
+        except ValueError as error:
+            st.session_state.coordinate_error = str(error)
+        else:
+            st.session_state.map_center = target
+            st.session_state.map_zoom = 16
+            st.session_state.coordinate_target = target
+            st.session_state.pop("coordinate_error", None)
+            # A fresh component key prevents its cached previous viewport from
+            # overwriting this requested navigation. Recovery restores drawings,
+            # the current editor/draft, and the requested center on remount.
+            st.session_state.map_revision = st.session_state.get("map_revision", 0) + 1
+    if st.session_state.get("coordinate_error"):
+        st.error(st.session_state.coordinate_error)
+    target = st.session_state.get("coordinate_target")
+    if target is not None:
+        st.caption(f"Coordinate search location: {target[0]:.6f}, {target[1]:.6f} · Red point on the map.")
+
+
 @st.fragment
 def render_workspace():
     """Update map and confirmation together without rerunning the whole page."""
+    render_coordinate_search()
     mode = st.radio("Map tools", ["AOI boundaries", "Buildings"], horizontal=True, key="map_mode",
                     disabled=not st.session_state.get("drawings"))
     editor = mode == "Buildings"
@@ -251,6 +306,14 @@ def render_workspace():
         overlay = aoi_overlay(st.session_state.get("drawings", [])) if editor else building_overlay({
             "count": len(reviewed), "geojson": {"type": "FeatureCollection", "features": reviewed},
         })
+        overlays = ([overlay] if overlay else []) + road_overlays(
+            st.session_state.get("road_result"),
+            show_overture=st.session_state.get("show_overture_roads", True),
+            show_osm=st.session_state.get("show_osm_roads", True),
+        )
+        target_overlay = coordinate_overlay(st.session_state.get("coordinate_target"))
+        if target_overlay is not None:
+            overlays.append(target_overlay)
         result = st_folium(
             build_map(editable,
                       st.session_state.get("map_center"),
@@ -260,7 +323,7 @@ def render_workspace():
             zoom=st.session_state.get("map_zoom"),
             returned_objects=["all_drawings", "center", "zoom"],
             on_change=on_map_change,
-            feature_group_to_add=overlay,
+            feature_group_to_add=overlays or None,
         )
         remember_map_state(result, editor=editor)
 
@@ -349,6 +412,7 @@ def render_workspace():
         )
         st.caption("Saves pet-project-aoi.geojson to your browser's download location "
                    "(usually Downloads). No file is saved until you click Download.")
+        render_road_controls(collection, selection_key(drawings))
         with st.expander("View / copy GeoJSON", expanded=True):
             st.caption("WGS 84 · [longitude, latitude]. Use the code block's copy button.")
             st.code(json.dumps(collection, indent=2, allow_nan=False), language="json")

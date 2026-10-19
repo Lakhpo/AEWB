@@ -1,6 +1,7 @@
 """Regression checks for AOI confirmation and map recovery."""
 
 import json
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -19,6 +20,71 @@ POLYGON = {"type": "Feature", "properties": {}, "geometry": {
 
 
 class SelectionUITests(unittest.TestCase):
+    def test_backend_sources_are_watchable_without_losing_existing_pythonpath(self):
+        from streamlit.file_util import file_in_pythonpath
+        repository = Path(APP).resolve().parents[3]
+        existing = str(repository / "tests")
+        with patch.dict(os.environ, {"PYTHONPATH": existing}), \
+             patch("streamlit_folium.st_folium", return_value={"all_drawings": None}):
+            app = AppTest.from_file(APP).run()
+            self.assertFalse(app.exception)
+            self.assertIn(existing, os.environ["PYTHONPATH"].split(os.pathsep))
+            for module in ("core/geometry.py", "analysis/analysis.py", "services/buildings.py"):
+                self.assertTrue(file_in_pythonpath(str(repository / "src/geoanalysis" / module)))
+            app.run()
+            self.assertEqual(os.environ["PYTHONPATH"].split(os.pathsep).count(str(repository / "src")), 1)
+
+    def test_coordinate_search_navigates_without_changing_aoi_or_analysis(self):
+        event = {"all_drawings": [POLYGON], "center": {"lat": 43, "lng": -89}, "zoom": 12}
+        with patch("streamlit_folium.st_folium", return_value=event) as component:
+            app = AppTest.from_file(APP).run()
+            aoi_key = json.dumps([POLYGON["geometry"]], sort_keys=True)
+            building_result = {"aoi_key": aoi_key, "count": 0, "skipped": 0, "release": "test",
+                               "geojson": {"type": "FeatureCollection", "features": []}}
+            road_result = {"aoi_key": aoi_key, "count": 0, "length_m": 0, "release": "test",
+                           "warnings": [], "overture": {"type": "FeatureCollection", "features": []}, "osm": None}
+            reviewed = [{**POLYGON, "id": "manual-test", "properties": {"origin": "manual", "status": "planned"}}]
+            app.session_state.building_result = building_result
+            app.session_state.building_review = reviewed
+            app.session_state.road_result = road_result
+            original_key = component.call_args.kwargs["key"]
+            # A fresh component initializes without returning cached drawings or
+            # the viewport from before the navigation request.
+            component.return_value = {"all_drawings": None}
+            app.text_input(key="coordinate_query").input("-33.8688, 151.2093")
+            next(button for button in app.button if button.label == "Go to coordinates").click().run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.session_state.map_center, [-33.8688, 151.2093])
+            self.assertEqual(component.call_args.kwargs["center"], [-33.8688, 151.2093])
+            self.assertEqual(component.call_args.kwargs["zoom"], 16)
+            self.assertNotEqual(component.call_args.kwargs["key"], original_key)
+            self.assertEqual(app.session_state.drawings, [POLYGON])
+            self.assertEqual(app.session_state.building_result, building_result)
+            self.assertEqual(app.session_state.building_review, reviewed)
+            self.assertEqual(app.session_state.road_result, road_result)
+            self.assertEqual(json.loads(app.code[0].value)["features"][0]["geometry"], POLYGON["geometry"])
+            self.assertEqual(len(component.call_args.kwargs["feature_group_to_add"]), 2)
+            # Ordinary navigation/reruns must not jump back to the search point.
+            component.return_value = {"all_drawings": None, "center": {"lat": -33.87, "lng": 151.22}, "zoom": 17}
+            app.run()
+            self.assertEqual(app.session_state.map_center, [-33.87, 151.22])
+
+    def test_coordinate_validation_keeps_view_and_works_without_aoi(self):
+        with patch("streamlit_folium.st_folium", return_value={"all_drawings": None}) as component:
+            app = AppTest.from_file(APP).run()
+            app.text_input(key="coordinate_query").input("91, 0")
+            next(button for button in app.button if button.label == "Go to coordinates").click().run()
+            self.assertFalse(app.exception)
+            self.assertIn("Latitude", app.error[0].value)
+            self.assertIsNone(component.call_args.kwargs["center"])
+            self.assertNotIn("coordinate_target", app.session_state)
+            app.text_input(key="coordinate_query").input("0, 0")
+            next(button for button in app.button if button.label == "Go to coordinates").click().run()
+            self.assertFalse(app.exception)
+            self.assertFalse(app.error)
+            self.assertEqual(component.call_args.kwargs["center"], [0.0, 0.0])
+            self.assertNotIn("drawings", app.session_state)
+
     def test_analysis_count_overlay_and_invalidation(self):
         small = {"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [
             [[-89, 43], [-88.99, 43], [-88.99, 43.01], [-89, 43]],

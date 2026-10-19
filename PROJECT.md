@@ -6,7 +6,7 @@ Pet Project is a Python-based geospatial web application intended for public acc
 
 The initial analytical objective is to identify and count buildings within user-selected Areas of Interest (AOIs), including rural areas. Prefer established building footprint datasets before developing custom roof-detection models.
 
-The current checkpoint covers the AOI-to-building workflow across Phases 2–4: Microsoft footprint retrieval, counting, overlays, downloads, and manual building review/planning. The latest Overture/OSM infrastructure changes have been reverted at the user's request. Keep infrastructure work, further engineering analysis, custom models, architecture migrations, and deployment deferred until requested.
+The current checkpoint covers the AOI-to-building workflow across Phases 2–4: Microsoft footprint retrieval, counting, overlays, downloads, and manual building review/planning. The next authorized increment adds independent Overture road centerlines and optional OSM reference roads within the AOI. Keep road editing/planning, easements, further engineering analysis, custom models, architecture migrations, and deployment deferred until requested.
 
 ## Intended user experience
 
@@ -38,7 +38,7 @@ The current checkpoint covers the AOI-to-building workflow across Phases 2–4: 
 | Initial hosting candidate | Streamlit Community Cloud |
 | Potential later architecture | FastAPI, separate frontend, and background workers |
 
-Runtime dependencies are recorded in `requirements.txt`: Streamlit, Folium, streamlit-folium, Shapely for geometry validation, and requests for source downloads. GeoPandas and Rasterio remain deferred. Deployment compatibility will be validated before hosting.
+Runtime dependencies are recorded in `requirements.txt`: Streamlit, Folium, streamlit-folium, Shapely for geometry validation, requests for source downloads, overturemaps for road retrieval, and pyproj for geodesic length measurements. GeoPandas and Rasterio remain deferred. Deployment compatibility will be validated before hosting.
 
 ## Proposed architecture and repository structure
 
@@ -54,14 +54,17 @@ src/
     __init__.py                     # Existing Python package
     ui/
       app.py                        # Streamlit map, drawing controls, and results
+      roads.py                      # Independent road controls, overlays, and downloads
     core/
       geometry.py                   # AOI validation, coordinates, GeoJSON, CRS handling
       building_review.py            # Manual review, planning status, and source reconciliation
     services/
       imagery.py                    # Imagery access/downloads when required
       buildings.py                  # Microsoft partition index and bounded GeoJSONL reads
+      roads.py                      # Bounded Overture worker and OSM highway queries
     analysis/
       analysis.py                   # AOI-driven processing and building analysis
+      roads.py                      # AOI clipping and per-source geodesic road measurements
 tests/                              # Phase-appropriate validation
 data/
   samples/                          # Small, redistributable sample inputs only
@@ -74,7 +77,7 @@ scripts/                            # Development and maintenance utilities
     ci.yml                          # Automated checks when implemented
 ```
 
-This structure reflects existing directories. UI modules implement map/AOI and review controls; core modules validate/reconcile edits; services supply Microsoft footprint data; analysis modules filter and count it. The imagery-download module remains a placeholder. Keep Streamlit-specific state and widgets in `ui`; backend modules accept ordinary Python/geospatial inputs without depending on Streamlit. Map tile display and imagery downloads are separate needs; this workflow does not implement imagery downloads.
+This structure reflects existing directories. UI modules implement map/AOI, building review, and road controls; core modules validate/reconcile edits; services supply Microsoft footprints and Overture/OSM roads; analysis modules filter, clip, count, and measure them. The imagery-download module remains a placeholder. Keep Streamlit-specific state and widgets in `ui`; backend modules accept ordinary Python/geospatial inputs without depending on Streamlit. Map tile display and imagery downloads are separate needs; this workflow does not implement imagery downloads.
 
 ## Development roadmap and phase validation
 
@@ -85,6 +88,8 @@ Build a browser-based Streamlit application with satellite imagery, zooming, pan
 Navigation includes enabled-by-default Esri World Boundaries and Places and World Transportation reference overlays for city names, administrative boundaries, roads, and street names, with independent layer toggles. Submitted address/city/place search through Folium's Nominatim geocoder fits the result's bounds and displays a location pin while preserving drawn AOIs. The pin does not create an AOI and is excluded from exports. Street labels depend on zoom and address results depend on dataset coverage. Autocomplete is disabled. Review Nominatim's usage policy before public deployment and use a provider suitable for expected traffic.
 
 Validate map display, both drawing tools, coordinate order, and successful export of a valid selected boundary. Handle missing or invalid selections clearly. Provider choice and required attribution belong to this phase; building analysis belongs to subsequent phases.
+
+Coordinate navigation accepts WGS 84 decimal degrees in **latitude, longitude** order above the map, separated by a comma or whitespace. Validate finite values and latitude/longitude bounds before navigating. **Go to coordinates** zooms to the target and displays a red reference point while retaining AOIs, manual building work, and road results. The point does not enter any GeoJSON export. Navigation works without an AOI and makes no geocoding request. Degrees/minutes/seconds input is deferred.
 
 Completing or editing an AOI must retain the current map location/zoom and show persistent selection confirmation. Present the GeoJSON download and copyable preview next to the map, with the filename and browser download destination explained. Preserve the editable selection and viewport through reruns within the active session; permanent AOI storage is outside Phase 1.
 
@@ -123,6 +128,18 @@ The map has separate **AOI boundaries** and **Buildings** modes. In Buildings mo
 Manual edits must be valid polygons and each building must overlap the AOI interior. Reject invalid/outside/duplicate same-status footprints as a whole edit snapshot, retain the last valid count, disable review download while the draft is invalid, and allow draft discard. Multipart source buildings are decomposed into editable Polygon layers and reassembled under their stable parent ID, so parts still count as one building. Removing all parts removes the building. Offer a single-step undo for accepted building edits.
 
 The source result is immutable in session state. The working review tracks stable source IDs, geometry adjustments, manually added records, existing/planned status, and removed source IDs. Running analysis again for the same AOI preserves valid corrections, plans, and removals. Changing/clearing the AOI resets the building workspace; the UI instructs users to download first. `pet-project-buildings.geojson` exports active building records and provenance/license metadata. Edited reviews remain session-only; project re-import is not implemented.
+
+### Streets and roadways increment
+
+Use **Load roads** independently of **Run Analysis**. Query the AOI bounds worldwide with Overture's official Python client (1.0.2), pinned transportation release **2026-09-23.1**, selecting subtype `road`. This includes streets, tracks, footpaths, and cycleways, with rail/water excluded. Preserve Microsoft building analysis and manual review unchanged.
+
+Validate/union AOIs, clip road lines to their interiors (excluding holes and boundary-only contacts), retain stable source IDs and attributes, and calculate WGS 84 geodesic centerline lengths. Source access rules retain their original segment/way scope and fractions; do not treat them as verified public access or easement boundaries. Query location comes directly from the AOI; no country selector or reverse geocoder is needed.
+
+Optionally retrieve live OSM highway ways with Overpass as a separate reference layer. Overture already incorporates OSM, so preserve separate layers, source counts, and downloads rather than adding overlapping lengths together. Yellow lines identify Overture; dashed blue lines identify OSM. The displayed length covers Overture only and includes road-subtype paths. Segment counts are not counts of named roads. GeoJSON exports retain original source attributes and ODbL attribution. Results remain session-only and are invalidated when the AOI changes.
+
+Road AOI bounds may span at most **0.1 degrees per axis**. Overture runs in a subprocess with a **180-second hard timeout**, at most **30,000 scanned records**, **10,000 road records**, and **20 MiB JSON output**. OSM responses are bounded to **20 MiB**, **10,000 ways**, a **40-second query timeout**, network timeouts, and a 60-second streaming check. Primary failures never publish partial or false-zero results; a failed reload explicitly retains the last successful road result. Optional OSM failures display a warning while preserving Overture roads. Source coverage and positional accuracy vary; OSM bbox queries may miss crossing ways without a node in the query bounds.
+
+Validate clipping, holes, source failures/limits, source separation, worldwide bounds, overlay identity, AOI invalidation, and preservation of building edits/viewport. Exercise a live source query and manually check browser rendering when a browser is available. Road editing, automatic source conflation, routing, corridor planning, and public-easement lookup are outside this increment.
 
 ### Phase 5 — Public deployment
 

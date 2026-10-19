@@ -3,6 +3,8 @@
 
 `src/geoanalysis/ui/app.py` is the Streamlit entry point. Folium renders an Esri World Imagery tile layer with attribution and Leaflet.Draw controls. `streamlit-folium` returns `all_drawings` as GeoJSON Features after drawing, editing, and deletion.
 
+The entry point adds the absolute `src` directory to both `sys.path` and `PYTHONPATH`, preserving existing environment entries. Streamlit's imported-module watcher uses `PYTHONPATH`, not arbitrary additions to `sys.path`, when deciding whether sibling backend files should be watched. This allows changes in `core`, `services`, and `analysis` to invalidate cached modules on rerun. Servers launched before this registration need a one-time restart; no forced per-rerun module reload is used.
+
 The map and AOI confirmation panel run together in a Streamlit fragment so map interactions do not rerun the surrounding page. The component returns its center, zoom, and drawing collection; an on-change callback stores them before rerendering. Center and zoom are passed through the component's dynamic viewport arguments. An empty drawing list clears the selection; a `None` response during initialization does not replace it or reset the saved viewport.
 
 The map script and component key remain stable as selection/viewport data change. Recovery data is serialized separately in the HTML; on an iframe remount, a Folium macro restores the last center/zoom and repopulates the actual editable Leaflet.Draw feature group. It does not add duplicate display-only polygons during normal reruns. The explicit clear button resets the drawings and changes the component key while retaining the current location.
@@ -12,6 +14,8 @@ The persistent **Your AOI & GeoJSON** panel sits next to the map. Valid boundari
 Optional Esri World Boundaries and Places and World Transportation reference tile layers supply city labels, administrative boundaries, roads, and street names above satellite imagery, below the AOI drawings. Both are enabled by default and independently exposed in a layer control. Folium's Geocoder control submits address/city/place searches directly from the browser to OpenStreetMap Nominatim. The default result handler fits the result bounds and adds a navigation marker; `zoom=None` preserves that fitted view rather than forcing a city-scale zoom on addresses. The marker is outside Leaflet.Draw's feature group and is not included in `all_drawings` or AOI exports. Suggestions while typing are disabled via the suggestion-length threshold. Search attribution is shown below the map. Public deployment must account for Nominatim's shared rate limit and caching requirements or select another geocoding provider.
 
 `core/geometry.py` validates the entire selection before export: polygon-only geometry, closed rings, finite WGS 84 coordinates, no date-line-crossing edges, and valid topology through Shapely. It returns a fresh FeatureCollection without mutating the component's data. Every drawn polygon is exported; selecting one polygon from several or unioning them is outside this phase.
+
+The coordinate form above the map uses `core/geometry.py::parse_coordinates` to validate decimal latitude/longitude pairs, then sets the viewport to zoom 16. Explicit submission increments the component revision to avoid replaying its previous cached viewport; the existing recovery macro restores the editable AOI/building collection or draft at the requested location. Analysis and review state remain untouched. A separate dynamic feature group displays the red navigation point, excluding it from drawings and exports. Normal reruns/panning do not reapply the searched center, and invalid input leaves the prior view unchanged. No geocoding service is called.
 
 The UI never exports a stale validated selection after an invalid drawing. It builds the download from the current validated drawings, and disables export by omitting it when validation fails or the selection is empty. Downloading does not trigger an application rerun.
 
@@ -29,6 +33,14 @@ The map mode changes which collection is inside Leaflet.Draw: AOI boundaries in 
 
 The map callback routes `all_drawings` to AOI handling or building review validation according to the mode. Building edits never overwrite `session_state.drawings` or invalidate the source result. Source refresh merges prior additions/overrides and removed source IDs; changing an AOI explicitly clears the review workspace. New plans do not require source retrieval. All review state is session-only; the separate building GeoJSON download preserves active records with provenance and existing/planned status.
 
+## Independent road layers
+
+`services/roads.py` runs the official Overture client in a subprocess with a 180-second deadline, so client startup/STAC access and cloud scanning cannot block the Streamlit session indefinitely. The child queries pinned release 2026-09-23.1 with bbox/STAC pruning, filters subtype `road`, retains source attributes, and returns bounded JSON through a temporary file. Temporary output is removed after reading. No cloud credentials are required. The parent converts source, dependency, timeout, and ambiguous reader failures into `RoadDataError`.
+
+The same service makes optional, explicit Overpass highway-way requests and rejects response remarks, incomplete geometry, and oversized responses. `analysis/roads.py::find_roads` validates/unions AOIs and enforces local bounds, clips centerlines to AOI interiors, excludes holes and boundary-only contacts, deduplicates source IDs, and measures WGS 84 geodesic lengths with pyproj. Overture and OSM remain independent reference datasets, avoiding misleading totals from overlapping sources. Access tags and scoped rules remain attached to original source IDs; linear fractions are not remapped after clipping.
+
+`ui/roads.py` owns road controls, escaped name/class tooltips, visibility toggles, error reporting, source-separated downloads, and map overlays. `road_result` is bound to the AOI fingerprint and `road_error` stores the last reload error. Loading does not change building state, map mode, viewport, or map revision. Existing result groups plus road groups are passed as a list to `feature_group_to_add`, keeping the base map script/component identity stable. Roads never enter Leaflet.Draw's editable feature group. AOI changes/clear invalidate both road results and errors; panning and building edits retain them. Failed reloads retain the prior successful dataset with an explicit notice; optional OSM failures retain Overture with a warning. See `PROJECT.md` for limits and deferred scope.
+
 ## Provider references
 
 - [Folium drawing controls](https://python-visualization.github.io/folium/latest/user_guide/plugins/draw.html)
@@ -39,12 +51,16 @@ The map callback routes `all_drawings` to AOI handling or building review valida
 - [Esri World Transportation service](https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer)
 - [Esri attribution and access guidance](https://doc.arcgis.com/en/arcgis-online/reference/display-copyrights.htm)
 - [GlobalMLBuildingFootprints data and license](https://github.com/microsoft/GlobalMLBuildingFootprints)
+- [Overture transportation data](https://docs.overturemaps.org/guides/transportation/)
+- [Overture Python client](https://docs.overturemaps.org/getting-data/overturemaps-py/)
+- [Overture licensing and attribution](https://docs.overturemaps.org/attribution/)
+- [Overpass query language](https://wiki.openstreetmap.org/wiki/Overpass_API/Overpass_QL)
 
 Public deployment still requires review of provider terms and capacity. No public deployment is performed in Phase 1.
 
 ## Current validation
 
-The 24 local tests cover geometry validation, source failures/limits, AOI invalidation, map identity, manual building edits, separate planned counts, multipart identity, undo, and source refresh preservation.
+The local tests cover geometry validation, source failures/limits, AOI invalidation, map identity, manual building edits, separate planned counts, multipart identity, undo, and source refresh preservation. Road tests additionally cover clipping and holes, source separation, worldwide bounds, optional-source failure, worker timeout, Overture subtype/release parameters, rejected partial Overpass results, tooltip escaping, visibility toggles, and preservation of building edits and viewport.
 
 Live source checks on 2026-10-18 used the pinned 2026-08-13 release:
 
@@ -52,3 +68,5 @@ Live source checks on 2026-10-18 used the pinned 2026-08-13 release:
 - Rural Wisconsin rectangle: west -89.505, south 43.195, east -89.48, north 43.215; 65 matching footprints from one downloaded partition, with no invalid records skipped.
 
 These validate the source-to-filter workflow, not the real-world completeness or residential use of the buildings. Automated Streamlit checks verify the count and overlay arguments; visual browser verification of the orange overlays is still required.
+
+Live road-source check on 2026-10-19: a Madison AOI bounded by west -89.402, south 43.070, east -89.395, north 43.075 returned 541 Overture road/path segments totaling 21.74 km inside the AOI and 811 OSM reference ways, with no warnings. Sources were measured/displayed separately. These are dataset-query results, not surveyed lengths or verified public easements. No automated browser surface was available for visual rendering checks.

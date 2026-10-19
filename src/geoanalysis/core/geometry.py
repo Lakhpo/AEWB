@@ -2,9 +2,28 @@
 
 from copy import deepcopy
 from math import isfinite
+import re
 
 from shapely.geometry import shape
 from shapely.validation import explain_validity
+
+
+def parse_coordinates(value: str) -> tuple[float, float]:
+    """Read WGS 84 decimal degrees in user-facing latitude, longitude order."""
+    parts = re.split(r"\s*,\s*|\s+", value.strip())
+    if len(parts) != 2:
+        raise ValueError("Enter latitude, longitude in decimal degrees, for example: 43.0731, -89.4012.")
+    try:
+        latitude, longitude = map(float, parts)
+    except ValueError as error:
+        raise ValueError("Use decimal degrees, for example: 43.0731, -89.4012. Use negative values for south or west.") from error
+    if not isfinite(latitude) or not isfinite(longitude):
+        raise ValueError("Coordinates must be finite numbers.")
+    if not -90 <= latitude <= 90:
+        raise ValueError("Latitude must be between -90 and 90.")
+    if not -180 <= longitude <= 180:
+        raise ValueError("Longitude must be between -180 and 180.")
+    return latitude, longitude
 
 
 def aoi_feature_collection(drawings: list[dict]) -> dict:

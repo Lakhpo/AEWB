@@ -6,7 +6,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from geoanalysis.core.geometry import aoi_feature_collection
+from geoanalysis.core.geometry import aoi_feature_collection, parse_coordinates
 
 
 def feature(ring):
@@ -48,6 +48,25 @@ class AOITests(unittest.TestCase):
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 aoi_feature_collection([self.rectangle, value])
+
+
+class CoordinateTests(unittest.TestCase):
+    def test_decimal_coordinates_keep_latitude_longitude_order(self):
+        for value, expected in [
+            ("43.0731, -89.4012", (43.0731, -89.4012)),
+            ("  -33.8688   151.2093  ", (-33.8688, 151.2093)),
+            ("0, 0", (0.0, 0.0)),
+            ("90, -180", (90.0, -180.0)),
+            ("-90, 180", (-90.0, 180.0)),
+        ]:
+            with self.subTest(value=value):
+                self.assertEqual(parse_coordinates(value), expected)
+
+    def test_invalid_or_ambiguous_coordinates_are_rejected(self):
+        for value in ("", "43", "43, -89, 10", "north, west", "NaN, 0", "0, inf",
+                      "91, 0", "-91, 0", "0, 181", "0, -181", "43,", "43N, 89W"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_coordinates(value)
 
 
 if __name__ == "__main__":
