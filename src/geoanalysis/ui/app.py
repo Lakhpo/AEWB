@@ -31,6 +31,9 @@ from geoanalysis.core.building_review import (
     editing_parts, merge_analysis, review_counts, source_buildings, validate_building_edits,
 )
 from geoanalysis.ui.roads import render_road_controls, road_overlays
+from geoanalysis.ui.osm_buildings import render_osm_building_controls, osm_building_overlays
+from geoanalysis.ui.pathways import remember_pathway_edits, render_pathway_controls, pathway_overlays
+from geoanalysis.ui.elevation import render_elevation_controls, elevation_overlays, selected_interval
 
 
 class RestoreMapState(MacroElement):
@@ -46,18 +49,22 @@ class RestoreMapState(MacroElement):
         {{ this._parent.get_name() }}.setView(saved.center, saved.zoom, {animate: false});
         function buildingStyle(feature) {
             var p = feature.properties || {};
+            if (p.role === 'pathway') return {color: '#f472b6', weight: 4,
+                dashArray: p.status === 'planned' ? '7 5' : null};
             var color = p.status === 'planned' ? '#c084fc' :
                 (p.origin === 'manual' ? '#22c55e' : '#ff9f1c');
             return {color: color, fillColor: color, weight: 2, fillOpacity: 0.45};
         }
-        L.geoJSON(saved.drawings, saved.editor ? {style: buildingStyle} : {}).eachLayer(function(layer) {
+        L.geoJSON(saved.drawings, (saved.editor || saved.pathway_editor) ? {style: buildingStyle} : {}).eachLayer(function(layer) {
             drawnItems_{{ this.draw.get_name() }}.addLayer(layer);
         });
         {{ this._parent.get_name() }}.on('draw:created', function(e) {
-            if (!saved.editor) return;
+            if (!saved.editor && !saved.pathway_editor) return;
             var id = 'manual-' + crypto.randomUUID();
             e.layer.feature = {type: 'Feature', id: id, properties: {
-                role: 'building', review_id: id, origin: 'manual', status: saved.new_status
+                role: saved.pathway_editor ? 'pathway' : 'building', review_id: id,
+                origin: 'manual', status: saved.new_status,
+                ...(saved.pathway_editor ? {public_access: 'unverified'} : {})
             }};
             e.layer.setStyle(buildingStyle(e.layer.feature));
         });
@@ -70,7 +77,7 @@ class RestoreMapState(MacroElement):
         self.draw = draw
 
 
-def build_map(drawings=None, center=None, zoom=4, editor=False, new_status="existing") -> folium.Map:
+def build_map(drawings=None, center=None, zoom=4, editor=False, new_status="existing", pathway_editor=False) -> folium.Map:
     """Keep the map script stable; provide recovery data separately."""
     map_view = folium.Map(
         location=[39.5, -98.35], zoom_start=4, tiles=None,
@@ -85,6 +92,7 @@ def build_map(drawings=None, center=None, zoom=4, editor=False, new_status="exis
     ).add_to(map_view)
     # Keep navigation labels above imagery and below editable AOI polygons.
     folium.map.CustomPane("navigation_labels", z_index=350, pointer_events=False).add_to(map_view)
+    folium.map.CustomPane("terrain", z_index=250, pointer_events=True).add_to(map_view)
     folium.TileLayer(
         tiles="https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
         attr="Labels and boundaries &copy; Esri and contributors",
@@ -113,17 +121,18 @@ def build_map(drawings=None, center=None, zoom=4, editor=False, new_status="exis
     draw = Draw(
         export=False, show_geometry_on_click=False,
         draw_options={
-            "polyline": False, "circle": False, "circlemarker": False,
+            "polyline": {"allowIntersection": False, "shapeOptions": {"color": "#f472b6", "weight": 4}} if pathway_editor else False,
+            "circle": False, "circlemarker": False,
             "marker": False,
-            "polygon": {"allowIntersection": False, "showArea": False},
-            "rectangle": True,
+            "polygon": False if pathway_editor else {"allowIntersection": False, "showArea": False},
+            "rectangle": not pathway_editor,
         },
         edit_options={"edit": True, "remove": True},
     ).add_to(map_view)
     recovery = json.dumps({
         "center": center or [39.5, -98.35], "zoom": zoom,
         "drawings": {"type": "FeatureCollection", "features": drawings or []},
-        "editor": editor, "new_status": new_status,
+        "editor": editor, "new_status": new_status, "pathway_editor": pathway_editor,
     }).replace("<", "\\u003c")
     map_view.get_root().html.add_child(folium.Element(
         f'<script type="application/json" id="aoi-recovery">{recovery}</script>'
@@ -133,12 +142,14 @@ def build_map(drawings=None, center=None, zoom=4, editor=False, new_status="exis
     return map_view
 
 
-def remember_map_state(result, editor=False):
+def remember_map_state(result, editor=False, pathway_editor=False):
     """Keep the latest selection and viewport, including explicit deletions."""
     if not result:
         return
     if result.get("all_drawings") is not None:
-        if editor:
+        if pathway_editor:
+            remember_pathway_edits(result["all_drawings"])
+        elif editor:
             remember_building_edits(result["all_drawings"])
         else:
             if selection_key(result["all_drawings"]) != selection_key(st.session_state.get("drawings", [])):
@@ -172,7 +183,9 @@ def building_overlay(result):
 def clear_analysis():
     for name in ("building_result", "analysis_error", "building_review", "removed_buildings",
                  "building_edit_error", "building_draft", "last_building_event", "building_undo",
-                 "road_result", "road_error"):
+                 "road_result", "road_error", "osm_building_result", "osm_building_error",
+                 "pathway_review", "pathway_draft", "pathway_edit_error", "last_pathway_event", "pathway_undo",
+                 "elevation_result", "elevation_error"):
         st.session_state.pop(name, None)
 
 
@@ -278,9 +291,10 @@ def render_coordinate_search():
 def render_workspace():
     """Update map and confirmation together without rerunning the whole page."""
     render_coordinate_search()
-    mode = st.radio("Map tools", ["AOI boundaries", "Buildings"], horizontal=True, key="map_mode",
+    mode = st.radio("Map tools", ["AOI boundaries", "Buildings", "Pathways"], horizontal=True, key="map_mode",
                     disabled=not st.session_state.get("drawings"))
     editor = mode == "Buildings"
+    pathway_editor = mode == "Pathways"
     new_status = "existing"
     if editor:
         kind = st.radio("New footprints represent", ["Existing building", "Planned building"], horizontal=True)
@@ -288,9 +302,18 @@ def render_workspace():
         st.info("Draw a missing or planned building with the polygon/rectangle tool. "
                 "Use the trash tool to remove false positives, or the edit tool to adjust footprints; click Save when finished. "
                 "The blue AOI boundary is locked in this mode.")
+    elif pathway_editor:
+        kind = st.radio("New pathways represent", ["Planned pathway", "Existing pathway"], horizontal=True)
+        new_status = "existing" if kind == "Existing pathway" else "planned"
+        st.info("Draw a pathway with the line tool; click its last point to finish. "
+                "Use Edit and drag an endpoint to extend a sketch; drag middle handles to add bends, then Save. "
+                "Use Trash and Save to remove sketches. To extend a mapped reference road, draw a connecting line. "
+                "There is no automatic snapping or source-road editing. Keep sketches inside the AOI. "
+                "AOI, buildings, and source roads are locked references; public access is unverified.")
     else:
         st.caption("Switch Map tools to Buildings to correct footprints or draw plans. "
-                   "Changing the AOI clears the building review; download your edited buildings first.")
+                   "Use Pathways to draw or extend pathway sketches. "
+                   "Changing the AOI clears building reviews and pathway sketches; download your work first.")
     if "building_review" not in st.session_state:
         originals = st.session_state.get("building_result", {}).get("geojson", {}).get("features", [])
         st.session_state.building_review = source_buildings(originals)
@@ -298,12 +321,14 @@ def render_workspace():
     key = f"aoi_map_{st.session_state.get('map_revision', 0)}_{mode}_{new_status}"
 
     def on_map_change():
-        remember_map_state(st.session_state.get(key), editor=editor)
+        remember_map_state(st.session_state.get(key), editor=editor, pathway_editor=pathway_editor)
 
     with map_column:
         reviewed = st.session_state.get("building_review", [])
         editable = st.session_state.get("building_draft", editing_parts(reviewed)) if editor else st.session_state.get("drawings", [])
-        overlay = aoi_overlay(st.session_state.get("drawings", [])) if editor else building_overlay({
+        if pathway_editor:
+            editable = st.session_state.get("pathway_draft", st.session_state.get("pathway_review", []))
+        overlay = aoi_overlay(st.session_state.get("drawings", [])) if editor or pathway_editor else building_overlay({
             "count": len(reviewed), "geojson": {"type": "FeatureCollection", "features": reviewed},
         })
         overlays = ([overlay] if overlay else []) + road_overlays(
@@ -311,13 +336,28 @@ def render_workspace():
             show_overture=st.session_state.get("show_overture_roads", True),
             show_osm=st.session_state.get("show_osm_roads", True),
         )
+        overlays += osm_building_overlays(st.session_state.get("osm_building_result"),
+                                          visible=st.session_state.get("show_osm_buildings", True))
+        overlays += elevation_overlays(st.session_state.get("elevation_result"),
+                                        visible=st.session_state.get("show_elevation", True),
+                                        opacity=st.session_state.get("elevation_opacity", 0.65),
+                                        collection={"type": "FeatureCollection", "features": st.session_state.get("drawings", [])},
+                                        interval=selected_interval())
+        if pathway_editor:
+            reference_buildings = building_overlay({"count": len(reviewed),
+                "geojson": {"type": "FeatureCollection", "features": reviewed}})
+            if reference_buildings:
+                overlays.append(reference_buildings)
+        else:
+            overlays += pathway_overlays(st.session_state.get("pathway_review", []))
         target_overlay = coordinate_overlay(st.session_state.get("coordinate_target"))
         if target_overlay is not None:
             overlays.append(target_overlay)
         result = st_folium(
             build_map(editable,
                       st.session_state.get("map_center"),
-                      st.session_state.get("map_zoom", 4), editor=editor, new_status=new_status),
+                      st.session_state.get("map_zoom", 4), editor=editor, new_status=new_status,
+                      pathway_editor=pathway_editor),
             key=key, height=600, use_container_width=True,
             center=st.session_state.get("map_center"),
             zoom=st.session_state.get("map_zoom"),
@@ -325,7 +365,7 @@ def render_workspace():
             on_change=on_map_change,
             feature_group_to_add=overlays or None,
         )
-        remember_map_state(result, editor=editor)
+        remember_map_state(result, editor=editor, pathway_editor=pathway_editor)
 
     with selection_column:
         st.subheader("Your AOI & GeoJSON")
@@ -412,6 +452,9 @@ def render_workspace():
         )
         st.caption("Saves pet-project-aoi.geojson to your browser's download location "
                    "(usually Downloads). No file is saved until you click Download.")
+        render_pathway_controls(editor=pathway_editor)
+        render_elevation_controls(collection, selection_key(drawings))
+        render_osm_building_controls(collection, selection_key(drawings))
         render_road_controls(collection, selection_key(drawings))
         with st.expander("View / copy GeoJSON", expanded=True):
             st.caption("WGS 84 · [longitude, latitude]. Use the code block's copy button.")
@@ -440,6 +483,7 @@ def main() -> None:
             st.session_state.drawings = []
             clear_analysis()
             st.session_state.map_mode = "AOI boundaries"
+        st.caption("Clearing the AOI also removes pathway sketches and all source results. Download your work first.")
         st.divider()
         st.markdown("**Building data**")
         st.markdown("[Microsoft GlobalMLBuildingFootprints](https://github.com/microsoft/GlobalMLBuildingFootprints)")

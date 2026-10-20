@@ -6,7 +6,11 @@ Pet Project is a Python-based geospatial web application intended for public acc
 
 The initial analytical objective is to identify and count buildings within user-selected Areas of Interest (AOIs), including rural areas. Prefer established building footprint datasets before developing custom roof-detection models.
 
-The current checkpoint covers the AOI-to-building workflow across Phases 2–4: Microsoft footprint retrieval, counting, overlays, downloads, and manual building review/planning. The next authorized increment adds independent Overture road centerlines and optional OSM reference roads within the AOI. Keep road editing/planning, easements, further engineering analysis, custom models, architecture migrations, and deployment deferred until requested.
+The current checkpoint covers the AOI-to-building workflow across Phases 2–4: Microsoft footprint retrieval, counting, overlays, downloads, and manual building review/planning, plus independent Overture road centerlines and optional OSM reference roads within the AOI. The authorized pathway increment adds manual line sketches, extension/editing, removal, undo, and separate export. Source-road editing, automatic routing/snapping, easements, further engineering analysis, custom models, architecture migrations, and deployment remain deferred.
+
+The authorized building-source increment adds an independent optional OSM building footprint layer to compare coverage gaps, with separate counts and GeoJSON downloads. Microsoft analysis and editable reviews remain unchanged. Automatic cross-source matching/merging and OSM-to-review import are deferred.
+
+The authorized elevation increment adds FABDEM V1-2 terrain statistics, an AOI-masked topographic contour overlay with legend, and GeoTIFF/contour/summary downloads. This is ground-terrain analysis, not rooftop surface modeling. Slope, hydrology, earthworks, and other engineering calculations remain deferred.
 
 ## Intended user experience
 
@@ -34,11 +38,11 @@ The current checkpoint covers the AOI-to-building workflow across Phases 2–4: 
 | Web interface | Streamlit |
 | Interactive map and drawing | Folium and streamlit-folium |
 | AOI boundary interchange | GeoJSON |
-| Future vector and raster operations | GeoPandas, Shapely, Rasterio, added when needed |
+| Geospatial processing | Shapely, pyproj, Rasterio, NumPy; GeoPandas remains deferred |
 | Initial hosting candidate | Streamlit Community Cloud |
 | Potential later architecture | FastAPI, separate frontend, and background workers |
 
-Runtime dependencies are recorded in `requirements.txt`: Streamlit, Folium, streamlit-folium, Shapely for geometry validation, requests for source downloads, overturemaps for road retrieval, and pyproj for geodesic length measurements. GeoPandas and Rasterio remain deferred. Deployment compatibility will be validated before hosting.
+Runtime dependencies are recorded in `requirements.txt`: Streamlit, Folium, streamlit-folium, Shapely for geometry validation, requests for source downloads, overturemaps for road retrieval, pyproj for geodesic length measurements, Rasterio/NumPy for terrain rasters, Pillow for worker previews, and ContourPy for topographic isolines. GeoPandas remains deferred. Deployment compatibility will be validated before hosting.
 
 ## Proposed architecture and repository structure
 
@@ -55,16 +59,24 @@ src/
     ui/
       app.py                        # Streamlit map, drawing controls, and results
       roads.py                      # Independent road controls, overlays, and downloads
+      osm_buildings.py              # Independent OSM building reference layer
+      pathways.py                   # User pathway sketch controls and overlays
+      elevation.py                  # FABDEM terrain controls and raster overlay
     core/
       geometry.py                   # AOI validation, coordinates, GeoJSON, CRS handling
       building_review.py            # Manual review, planning status, and source reconciliation
+      pathways.py                   # Pathway validation and geodesic sketch measurements
     services/
       imagery.py                    # Imagery access/downloads when required
       buildings.py                  # Microsoft partition index and bounded GeoJSONL reads
       roads.py                      # Bounded Overture worker and OSM highway queries
+      osm_buildings.py              # Bounded Overpass building/multipolygon access
+      elevation.py                  # Bounded official FABDEM archive range access
     analysis/
       analysis.py                   # AOI-driven processing and building analysis
       roads.py                      # AOI clipping and per-source geodesic road measurements
+      osm_buildings.py              # Independent OSM footprint selection/counting
+      elevation.py                  # Native-grid terrain statistics, masking, and exports
 tests/                              # Phase-appropriate validation
 data/
   samples/                          # Small, redistributable sample inputs only
@@ -129,6 +141,16 @@ Manual edits must be valid polygons and each building must overlap the AOI inter
 
 The source result is immutable in session state. The working review tracks stable source IDs, geometry adjustments, manually added records, existing/planned status, and removed source IDs. Running analysis again for the same AOI preserves valid corrections, plans, and removals. Changing/clearing the AOI resets the building workspace; the UI instructs users to download first. `pet-project-buildings.geojson` exports active building records and provenance/license metadata. Edited reviews remain session-only; project re-import is not implemented.
 
+### Optional OSM building footprints
+
+`analysis/osm_buildings.py::find_osm_buildings(collection)` validates/unions the AOI, queries worldwide AOI bounds through Overpass, and returns a separate footprint FeatureCollection and count. `services/osm_buildings.py` retrieves full geometry for `building` ways and building multipolygon relations, reconstructs split/reversed outer and inner member ways, preserves courtyards/multipart footprints, and excludes member ways already represented by a relation. Count unique full footprints with AOI interior overlap once; exclude boundary-only touches. Retain stable OSM IDs, original tags, ODbL license, attribution, retrieval time, and source timestamp. Points, `building=no`, and building-part-only features are excluded.
+
+`ui/osm_buildings.py` supplies explicit **Load OSM buildings**, a cyan read-only overlay, visibility toggle, separate count, and separate download. It works without Microsoft analysis, preserves the Microsoft original/review and roads/viewport, and never places OSM features in editable groups. Do not add source counts together or claim they describe unique combined buildings. AOI changes clear OSM results/errors; failed reloads retain the last successful result with an explicit notice. All results are session-only.
+
+OSM building AOIs span at most 0.1 degrees per axis. Overpass requests use a 40-second server timeout, 10-second connect/50-second read timeouts, a 60-second streaming check, 20 MiB response cap, and at most 10,000 returned records. Invalid geometry, partial-query remarks, network errors, and limits return actionable errors without partial/false-zero results. No API key is required; explicit loading sends AOI bounds to Overpass. OSM coverage varies in urban/rural areas and bbox queries can miss crossing buildings without a node in bounds. Respect ODbL attribution and applicable redistribution/share-alike requirements.
+
+Validate courtyard/multipart reconstruction, relation/member deduplication, full-footprint interior overlap, holes/touches, worldwide bounds, failure/limit handling, source isolation, AOI invalidation, and unchanged viewport/review/roads. Exercise rural/urban live queries and manually inspect map rendering when browser access is available.
+
 ### Streets and roadways increment
 
 Use **Load roads** independently of **Run Analysis**. Query the AOI bounds worldwide with Overture's official Python client (1.0.2), pinned transportation release **2026-09-23.1**, selecting subtype `road`. This includes streets, tracks, footpaths, and cycleways, with rail/water excluded. Preserve Microsoft building analysis and manual review unchanged.
@@ -140,6 +162,30 @@ Optionally retrieve live OSM highway ways with Overpass as a separate reference 
 Road AOI bounds may span at most **0.1 degrees per axis**. Overture runs in a subprocess with a **180-second hard timeout**, at most **30,000 scanned records**, **10,000 road records**, and **20 MiB JSON output**. OSM responses are bounded to **20 MiB**, **10,000 ways**, a **40-second query timeout**, network timeouts, and a 60-second streaming check. Primary failures never publish partial or false-zero results; a failed reload explicitly retains the last successful road result. Optional OSM failures display a warning while preserving Overture roads. Source coverage and positional accuracy vary; OSM bbox queries may miss crossing ways without a node in the query bounds.
 
 Validate clipping, holes, source failures/limits, source separation, worldwide bounds, overlay identity, AOI invalidation, and preservation of building edits/viewport. Exercise a live source query and manually check browser rendering when a browser is available. Road editing, automatic source conflation, routing, corridor planning, and public-easement lookup are outside this increment.
+
+### Manual pathway sketches
+
+**Pathways** map mode lets users draw line sketches, extend their own lines by moving endpoints, add bends with midpoint handles, and edit/delete with Save. New sketches default to planned, with an optional user-mapped existing status. Existing mapped road/path sources remain independent locked references; users can draw connecting sketches without importing or modifying source records. There is no automatic snapping, routing, or verification of public access/easements. Pink dashed lines identify planned sketches; pink solid lines identify user-mapped existing paths. Every sketch/export explicitly records `public_access=unverified`.
+
+`core/pathways.py` validates a whole LineString snapshot before accepting it. Require finite WGS 84 longitude/latitude coordinates, 2–2,000 vertices per line, no consecutive duplicate vertices, no date-line crossings or self-crossings, unique IDs/geometries (including reversed lines), and at most 1,000 sketches. Lines must stay inside the unioned AOI and outside its holes with some line interior inside the AOI; endpoints may meet the boundary. Invalid drafts preserve accepted sketches/totals and disable pathway export until corrected/discarded. Geodesic WGS 84 lengths use pyproj, with separate existing/planned sketch totals; overlapping routes are not conflated.
+
+`ui/pathways.py` maintains independent session review/draft/undo state and separate GeoJSON download. A single-step undo restores the previous accepted pathway snapshot, including deletions. Map navigation, coordinate search, mode changes, and source refreshes retain pathways and viewport. AOI changes/clear invalidate pathway work alongside other AOI-bound results. AOI/building edits and source downloads exclude pathways; only `pet-project-pathways.geojson` exports sketches. Download before refreshing/restarting/changing the AOI; persistence/re-import is deferred.
+
+Validate add/extend/delete/undo, invalid-draft recovery and disabled export, reversed duplicates, holes/boundaries, geodesic lengths, stable IDs and map identity, mode switches, AOI invalidation, and preservation of source/building work. Manually check line drawing and endpoint/midpoint editing when browser access is available.
+
+### FABDEM terrain elevation
+
+**Run FABDEM elevation analysis** operates independently of building, pathway, and road workflows. Use official University of Bristol FABDEM V1-2: a ground-elevation estimate with forest/building height biases removed, at 1 arc-second grid spacing (~30 m at the equator), horizontal WGS 84 and vertical EGM2008. Source license is **CC BY-NC-SA 4.0**, not unrestricted commercial/open use; the UI and exports disclose non-commercial/share-alike terms and source attribution, including required Copernicus credit/disclaimer. Commercial use requires separate arrangements with the provider; public deployment remains deferred.
+
+`services/elevation.py` resolves worldwide 1-degree tile names and enclosing 10-degree archives. It uses validated HTTP byte ranges and Python ZIP access to retrieve required members without downloading full regional archives. A half-cell lookup margin covers point-registered tile edges; missing archives/members are coverage errors, never zero elevations. Do not silently substitute another DEM. Shared transfer limit: 256 MiB, at most four tiles, 80 MiB compressed/expanded per tile, 10-second connect/30-second read timeouts, and time checks. Raw rasters and bulk archives are not retained in the repository.
+
+`analysis/elevation.py::find_elevation(collection)` validates/combines AOIs before starting a worker with a 180-second hard timeout. AOIs may span at most 0.1 degrees per axis and must lie between 85°S and 85°N for this map display. Rasterio validates CRS/layout/resolution, crops native-grid windows, mosaics tile seams, masks to AOI pixel centers (excluding holes), and limits the mosaic to 200,000 pixels. Summaries include minimum, maximum, mean, median, standard deviation, 5th/95th percentiles, relief, valid/selected/nodata samples, and coverage percentage. Statistics are unweighted valid-pixel summaries, not area-weighted terrain quantities. Partial nodata is explicitly disclosed; all-nodata/no-pixel AOIs fail with actionable messages. Tile/download/processing failures never publish partial results.
+
+The result includes an AOI-masked float32 GeoTIFF at the native geographic grid with nodata -9999, units/datum/source/license tags, and a JSON summary with source tiles, AOI bounds, timestamps, methods, limitations, and attribution. Statistics use native samples. `ui/elevation.py` displays non-editable brown contour vectors with white halos, thin regular lines and heavier index lines every fifth interval, labeled index elevations, hover elevations, and an on-map legend with intervals/range/datum. It replaces the colored raster display. Visibility/opacity controls, metrics, coverage notices, and downloads remain independent of other workflows. Outputs are capped at 20 MiB each and session-only. AOI changes clear results/errors; failed reloads explicitly retain the last successful result. Building edits, pathway work, roads, and viewport must survive analysis and visibility changes.
+
+`analysis/contours.py` uses ContourPy to derive linear isolines from native sample centers with masked quads excluded, then clips lines to the exact AOI and excludes boundary-only segments. Do not bridge holes/nodata or extrapolate to AOI edges. Auto interval targets about twelve levels with a 2 m minimum; users may choose 2/5/10/20/50/100 m. Limits: 100 levels, 5,000 line features, and 200,000 vertices, with actionable errors suggesting a coarser interval. Flat/narrow/all-masked terrain may have no lines and is explained. Finer intervals do not imply better vertical accuracy. Contours are cached on the current session's elevation result by AOI geometry and interval; existing saved GeoTIFF results can be displayed without redownloading FABDEM. Contour GeoJSON retains source/license metadata and regular/index elevations; summary download records interval/method. The worker's legacy PNG artifact remains available internally but is no longer displayed.
+
+Validate native-grid statistics and masking/holes, nodata/no samples, seams/overlapping AOIs, global tile naming, unsupported CRS/resolution, range validation and size limits, corrupt/missing archives, hard timeout, export metadata, source/workspace isolation, AOI invalidation, and overlay controls. Run a live official-source query and inspect browser alignment when available. Do not present this ~30 m terrain estimate as an engineering survey or as detailed building/road surface elevations.
 
 ### Phase 5 — Public deployment
 
